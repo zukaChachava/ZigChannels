@@ -12,6 +12,9 @@
 .idea/**/dictionaries
 .idea/**/shelf
 
+# Zig cache directory, used for build artifacts and other temporary files
+.zig-cache/
+
 # AWS User-specific
 .idea/**/aws.xml
 
