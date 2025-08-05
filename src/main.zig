@@ -14,31 +14,26 @@ pub fn main() !void {
 
     writerThread.join();
     readerThread.join();
-}
 
+    std.debug.print("Program finished\n", .{});
+}
 
 fn writer(channel: *channels.Channel(i32)) !void {
     var i: i32 = 0;
     const writerChannel = channel.getWriter();
 
-    while (i < 10) : (i += 1) {
+    while (i < 10) : (i += 1)
         try writerChannel.write(i);
-    }
 
     writerChannel.complete();
 }
 
 fn reader(channel: *channels.Channel(i32)) void {
     const readerChannel = channel.getReader();
+    var data = readerChannel.read();
 
-    while(!channel.completed){
-        const data = readerChannel.read();
-
-        if(data == null)
-            break;
-
-        std.debug.print("Received data: {}\n", .{data.?});
-    }
+    while (data != null) : (data = readerChannel.read())
+        std.debug.print("Received Data: {any}\n", .{data});
 
     std.debug.print("Reading completed\n", .{});
 }

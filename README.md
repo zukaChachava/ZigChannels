@@ -1,102 +1,273 @@
-# zigChannels
+# ZigChannels
 
-A thread-safe channel implementation for Zig, providing Go-style communication between threads using condition variables and mutexes.
+A thread-safe channel implementation for Zig, providing Go-style communication between threads using condition variables and mutexes. This library enables safe communication between threads using channels that can be closed and handle completion gracefully.
 
 ## Features
 
 - **Thread-safe**: Uses mutex and condition variables for proper synchronization
-- **Generic**: Works with any type `T`
-- **Efficient**: Uses condition variables to avoid busy-waiting
-- **Simple API**: Easy-to-use reader/writer pattern
-- **Memory managed**: Proper allocation and deallocation of channel nodes
+- **Generic**: Works with any type `T` using Zig's compile-time generics
+- **Completion handling**: Channels can be marked as completed to signal end of data
+- **Efficient**: Uses condition variables to avoid busy-waiting, threads block until data is available
+- **Memory managed**: Automatic allocation and deallocation of channel nodes using provided allocator
+- **Simple API**: Clean reader/writer pattern with minimal complexity
 
-## Installation
-
-### Using Zig Package Manager
-
-Add to your `build.zig.zon`:
-
-```zig
-.{
-    .name = "your-project",
-    .version = "0.1.0",
-    .dependencies = .{
-        .zigChannels = .{
-            .url = "https://github.com/yourusername/zigChannels/archive/main.tar.gz",
-            .hash = "...", // Will be filled automatically
-        },
-    },
-}
-```
-
-Then in your `build.zig`:
-
-```zig
-const zigChannels = b.dependency("zigChannels", .{
-    .target = target,
-    .optimize = optimize,
-});
-
-exe.root_module.addImport("zigChannels", zigChannels.module("zigChannels"));
-```
-
-### Manual Installation
-
-Clone this repository and add the `src/root.zig` file to your project.
-
-## Usage
-
-### Basic Example
+## Quick Start
 
 ```zig
 const std = @import("std");
-const zigChannels = @import("zigChannels");
+const channels = @import("channels");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    defer _ = gpa.deinit();
 
     // Create a channel for i32 values
-    var channel = zigChannels.Channel(i32).init(allocator);
-    
-    // Get reader and writer
-    var writer = channel.getWriter();
-    var reader = channel.getReader();
+    const channel = try channels.Channel(i32).init(allocator);
+    defer channel.deinit();
 
-    // Write to channel (from another thread)
-    try writer.write(42);
+    // Spawn producer and consumer threads
+    const writerThread = try std.Thread.spawn(.{}, writer, .{channel});
+    const readerThread = try std.Thread.spawn(.{}, reader, .{channel});
+
+    // Wait for completion
+    writerThread.join();
+    readerThread.join();
+}
+
+fn writer(channel: *channels.Channel(i32)) !void {
+    const writerChannel = channel.getWriter();
     
-    // Read from channel (blocks until data available)
-    const value = reader.read();
-    std.debug.print("Received: {}\n", .{value});
+    // Send some data
+    var i: i32 = 0;
+    while (i < 10) : (i += 1) {
+        try writerChannel.write(i);
+    }
+    
+    // Signal completion
+    writerChannel.complete();
+}
+
+fn reader(channel: *channels.Channel(i32)) void {
+    const readerChannel = channel.getReader();
+    
+    // Read until channel is completed
+    while (readerChannel.read()) |data| {
+        std.debug.print("Received: {}\n", .{data});
+    }
+    
+    std.debug.print("Reading completed\n", .{});
 }
 ```
 
-### Producer-Consumer Example
+## API Reference
+
+### Channel(T)
+
+The main channel type that provides thread-safe communication.
+
+#### Methods
+
+**`init(allocator: Allocator) !*Channel(T)`**
+- Creates a new channel instance
+- Requires an allocator for internal memory management
+- Returns a pointer to the channel
+
+**`deinit(self: *Self) void`**
+- Cleans up channel resources
+- Destroys all remaining nodes in the queue
+- Must be called to prevent memory leaks
+
+**`getWriter(self: *Self) Writer(T)`**
+- Returns a writer interface for sending data to the channel
+
+**`getReader(self: *Self) Reader(T)`**
+- Returns a reader interface for receiving data from the channel
+
+### Writer(T)
+
+Interface for sending data to a channel.
+
+**`write(self: Self, data: T) !void`**
+- Sends data to the channel
+- Thread-safe operation
+- Wakes up waiting readers
+- Returns immediately if channel is not completed
+
+**`complete(self: Self) void`**
+- Marks the channel as completed
+- Wakes up all waiting readers
+- No more data can be sent after completion
+
+### Reader(T)
+
+Interface for receiving data from a channel.
+
+**`read(self: Self) ?T`**
+- Reads data from the channel
+- Blocks if no data is available and channel is not completed
+- Returns `null` if channel is completed and no more data
+- Thread-safe operation
+
+## Usage Patterns
+
+### Basic Producer-Consumer
 
 ```zig
-const std = @import("std");
-const zigChannels = @import("zigChannels");
-const Thread = std.Thread;
-
-const WorkerData = struct {
-    channel: *zigChannels.Channel(i32),
-    start: i32,
-    end: i32,
-};
-
-fn producer(data: *WorkerData) void {
-    var writer = data.channel.getWriter();
+fn producer(channel: *channels.Channel([]const u8)) !void {
+    const writer = channel.getWriter();
     
-    for (data.start..data.end) |i| {
-        writer.write(@intCast(i)) catch |err| {
-            std.debug.print("Write error: {}\n", .{err});
-            return;
-        };
-        std.time.sleep(100 * std.time.ns_per_ms); // Simulate work
+    try writer.write("Hello");
+    try writer.write("World");
+    writer.complete();
+}
+
+fn consumer(channel: *channels.Channel([]const u8)) void {
+    const reader = channel.getReader();
+    
+    while (reader.read()) |message| {
+        std.debug.print("Got: {s}\n", .{message});
     }
 }
+```
+
+### Multiple Producers
+
+```zig
+fn multipleProducers() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+    
+    const channel = try channels.Channel(i32).init(allocator);
+    defer channel.deinit();
+    
+    // Spawn multiple producer threads
+    const producer1 = try std.Thread.spawn(.{}, producer, .{channel, 0, 5});
+    const producer2 = try std.Thread.spawn(.{}, producer, .{channel, 10, 15});
+    const consumer = try std.Thread.spawn(.{}, consumer, .{channel});
+    
+    producer1.join();
+    producer2.join();
+    
+    // Complete the channel when all producers are done
+    channel.getWriter().complete();
+    consumer.join();
+}
+```
+
+### Working with Complex Types
+
+```zig
+const Message = struct {
+    id: u32,
+    content: []const u8,
+    timestamp: i64,
+};
+
+fn processMessages() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+    
+    const channel = try channels.Channel(Message).init(allocator);
+    defer channel.deinit();
+    
+    // Producer sends structured messages
+    const writer = channel.getWriter();
+    try writer.write(.{
+        .id = 1,
+        .content = "Hello",
+        .timestamp = std.time.timestamp(),
+    });
+    writer.complete();
+    
+    // Consumer processes messages
+    const reader = channel.getReader();
+    while (reader.read()) |msg| {
+        std.debug.print("Message {}: {s} at {}\n", .{ msg.id, msg.content, msg.timestamp });
+    }
+}
+```
+
+## Implementation Details
+
+### Thread Safety
+
+- **Mutex Protection**: All channel operations are protected by a mutex
+- **Condition Variables**: Used for efficient blocking/waking of threads
+- **Memory Safety**: Proper allocation/deallocation prevents memory leaks
+
+### Performance Characteristics
+
+- **Blocking Reads**: Readers block when no data is available
+- **Non-blocking Writes**: Writers add data and immediately signal readers
+- **O(1) Operations**: Both read and write operations are constant time
+- **Memory Overhead**: Each message requires one doubly-linked list node
+
+### Memory Management
+
+- Uses provided allocator for all internal allocations
+- Nodes are allocated per message and freed when consumed
+- Channel cleanup destroys all remaining nodes
+- No memory leaks when properly using `defer channel.deinit()`
+
+## Building and Testing
+
+### Build
+
+```bash
+zig build
+```
+
+### Run Example
+
+```bash
+zig build run
+```
+
+### Debug Build
+
+```bash
+zig build -Doptimize=Debug
+```
+
+### Testing
+
+```bash
+zig build test
+```
+
+## VS Code Development
+
+This project includes VS Code configuration for debugging:
+
+- **Debug configurations** in `.vscode/launch.json`
+- **Build tasks** in `.vscode/tasks.json`
+- **Recommended extensions** for Zig development
+
+Press `F5` to start debugging the example application.
+
+## Requirements
+
+- **Zig 0.14.0** or later
+- **Windows/Linux/macOS** - cross-platform compatible
+
+## License
+
+MIT License - see LICENSE file for details.
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Add tests if applicable
+5. Submit a pull request
+
+## Examples
+
+See `src/main.zig` for a complete working example of the channel system in action.
 
 fn consumer(channel: *zigChannels.Channel(i32)) void {
     var reader = channel.getReader();
@@ -219,7 +390,7 @@ zig build -Doptimize=ReleaseFast
 
 ## Requirements
 
-- Zig 0.11.0 or later
+- Zig 0.14.0 or later
 
 ## Thread Safety
 
