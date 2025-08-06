@@ -13,8 +13,12 @@ pub fn Channel(comptime T: type) type{
 
         const Self = @This();
 
-        pub fn init(allocator: Allocator) !*Self{
-            const channel = try allocator.create(Self);
+        pub fn init(allocator: Allocator) ChannelError!*Self {
+            const channel = allocator.create(Self) catch | err | switch (err) {
+                error.OutOfMemory => return ChannelError.OutOfMemory,
+                else => unreachable
+            };
+
             channel.* = .{
                 .allocator = allocator,
                 .data = DoublyLinkedList(T){},
@@ -54,29 +58,29 @@ fn Writer(comptime T: type) type {
         channel: *Channel(T),
         const Self = @This();
 
-        pub fn write(self: Self, data: T) !void {
+        pub fn write(self: Self, data: T) ChannelError!void {
             self.channel.mutex.lock();
             defer self.channel.mutex.unlock();
 
             if(self.channel.completed)
-                return; // ToDo: Return Error
+                return ChannelError.ChannelClosed;
 
-            const node = try self.channel.allocator.create(std.DoublyLinkedList(T).Node);
-            node.* = .{
-                .data = data,
-                .next = null,
-                .prev = null
+            const node = self.channel.allocator.create(std.DoublyLinkedList(T).Node) catch | err | switch (err) {
+                error.OutOfMemory => return ChannelError.OutOfMemory,
+                else => unreachable
             };
+
+            node.data = data;
             self.channel.data.append(node);
             self.channel.signal.signal();
         }
 
-        pub fn complete(self: Self) void {
+        pub fn complete(self: Self) ChannelError!void {
             self.channel.mutex.lock();
             defer self.channel.mutex.unlock();
 
             if(self.channel.completed)
-                return; // ToDo: Return Error
+                return ChannelError.ChannelClosed;
 
             self.channel.completed = true;
             self.channel.signal.broadcast();
@@ -109,3 +113,8 @@ fn Reader(comptime T: type) type{
         }
     };
 }
+
+const ChannelError = error {
+    OutOfMemory,
+    ChannelClosed
+};

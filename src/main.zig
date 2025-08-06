@@ -25,7 +25,7 @@ fn writer(channel: *channels.Channel(i32)) !void {
     while (i < 10) : (i += 1)
         try writerChannel.write(i);
 
-    writerChannel.complete();
+    try writerChannel.complete();
 }
 
 fn reader(channel: *channels.Channel(i32)) void {
