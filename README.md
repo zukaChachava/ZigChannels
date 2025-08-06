@@ -9,6 +9,8 @@ A thread-safe channel implementation for Zig, providing Go-style communication b
 - **Completion handling**: Channels can be marked as completed to signal end of data
 - **Efficient**: Uses condition variables to avoid busy-waiting, threads block until data is available
 - **Memory managed**: Automatic allocation and deallocation of channel nodes using provided allocator
+- **Error handling**: Proper error types for channel operations (OutOfMemory, ChannelClosed)
+- **FIFO ordering**: Messages are delivered in first-in-first-out order
 - **Simple API**: Clean reader/writer pattern with minimal complexity
 
 ## Quick Start
@@ -45,7 +47,7 @@ fn writer(channel: *channels.Channel(i32)) !void {
     }
     
     // Signal completion
-    writerChannel.complete();
+    try writerChannel.complete();
 }
 
 fn reader(channel: *channels.Channel(i32)) void {
@@ -60,7 +62,48 @@ fn reader(channel: *channels.Channel(i32)) void {
 }
 ```
 
+## Installation
+
+### Using Zig Package Manager
+
+Add to your `build.zig.zon`:
+
+```zig
+.{
+    .name = "your-project",
+    .version = "0.1.0",
+    .dependencies = .{
+        .zigChannels = .{
+            .url = "https://github.com/zukaChachava/ZigChannels/archive/main.tar.gz",
+            .hash = "...", // Will be filled automatically
+        },
+    },
+}
+```
+
+Then in your `build.zig`:
+
+```zig
+const zigChannels = b.dependency("zigChannels", .{
+    .target = target,
+    .optimize = optimize,
+});
+
+exe.root_module.addImport("channels", zigChannels.module("zigChannels"));
+```
+
 ## API Reference
+
+### ChannelError
+
+Error types that can be returned by channel operations:
+
+```zig
+pub const ChannelError = error{
+    OutOfMemory,     // Memory allocation failed
+    ChannelClosed,   // Attempted to write to or complete a closed channel
+};
+```
 
 ### Channel(T)
 
@@ -68,10 +111,10 @@ The main channel type that provides thread-safe communication.
 
 #### Methods
 
-**`init(allocator: Allocator) !*Channel(T)`**
+**`init(allocator: Allocator) ChannelError!*Channel(T)`**
 - Creates a new channel instance
 - Requires an allocator for internal memory management
-- Returns a pointer to the channel
+- Returns a pointer to the channel or `ChannelError.OutOfMemory`
 
 **`deinit(self: *Self) void`**
 - Cleans up channel resources
@@ -88,16 +131,18 @@ The main channel type that provides thread-safe communication.
 
 Interface for sending data to a channel.
 
-**`write(self: Self, data: T) !void`**
+**`write(self: Self, data: T) ChannelError!void`**
 - Sends data to the channel
 - Thread-safe operation
 - Wakes up waiting readers
-- Returns immediately if channel is not completed
+- Returns `ChannelError.ChannelClosed` if channel is completed
+- Returns `ChannelError.OutOfMemory` if allocation fails
 
-**`complete(self: Self) void`**
+**`complete(self: Self) ChannelError!void`**
 - Marks the channel as completed
-- Wakes up all waiting readers
+- Wakes up all waiting readers using `broadcast()`
 - No more data can be sent after completion
+- Returns `ChannelError.ChannelClosed` if already completed
 
 ### Reader(T)
 
@@ -108,6 +153,7 @@ Interface for receiving data from a channel.
 - Blocks if no data is available and channel is not completed
 - Returns `null` if channel is completed and no more data
 - Thread-safe operation
+- Uses condition variables for efficient waiting
 
 ## Usage Patterns
 
@@ -119,7 +165,7 @@ fn producer(channel: *channels.Channel([]const u8)) !void {
     
     try writer.write("Hello");
     try writer.write("World");
-    writer.complete();
+    try writer.complete();
 }
 
 fn consumer(channel: *channels.Channel([]const u8)) void {
@@ -128,6 +174,47 @@ fn consumer(channel: *channels.Channel([]const u8)) void {
     while (reader.read()) |message| {
         std.debug.print("Got: {s}\n", .{message});
     }
+}
+```
+
+### Error Handling
+
+```zig
+fn safeWriter(channel: *channels.Channel(i32)) void {
+    const writer = channel.getWriter();
+    
+    // Handle write errors
+    writer.write(42) catch |err| switch (err) {
+        channels.ChannelError.ChannelClosed => {
+            std.debug.print("Channel is closed\n");
+        },
+        channels.ChannelError.OutOfMemory => {
+            std.debug.print("Out of memory\n");
+        },
+    };
+    
+    // Handle completion errors
+    writer.complete() catch |err| switch (err) {
+        channels.ChannelError.ChannelClosed => {
+            std.debug.print("Channel already closed\n");
+        },
+        channels.ChannelError.OutOfMemory => unreachable, // complete() doesn't allocate
+    };
+}
+
+fn safeReader(channel: *channels.Channel(i32)) void {
+    const reader = channel.getReader();
+    
+    // Using if let pattern for null checking
+    if (reader.read()) |data| {
+        std.debug.print("Received: {}\n", .{data});
+    } else {
+        std.debug.print("Channel completed\n");
+    }
+    
+    // Using orelse for default values
+    const data = reader.read() orelse -1;
+    std.debug.print("Data or default: {}\n", .{data});
 }
 ```
 
@@ -143,16 +230,31 @@ fn multipleProducers() !void {
     defer channel.deinit();
     
     // Spawn multiple producer threads
-    const producer1 = try std.Thread.spawn(.{}, producer, .{channel, 0, 5});
-    const producer2 = try std.Thread.spawn(.{}, producer, .{channel, 10, 15});
-    const consumer = try std.Thread.spawn(.{}, consumer, .{channel});
+    const producer1 = try std.Thread.spawn(.{}, producerFunc, .{channel, 1, 5});
+    const producer2 = try std.Thread.spawn(.{}, producerFunc, .{channel, 10, 15});
+    const consumer_thread = try std.Thread.spawn(.{}, consumerFunc, .{channel});
     
     producer1.join();
     producer2.join();
     
     // Complete the channel when all producers are done
-    channel.getWriter().complete();
-    consumer.join();
+    try channel.getWriter().complete();
+    consumer_thread.join();
+}
+
+fn producerFunc(channel: *channels.Channel(i32), start: i32, end: i32) !void {
+    const writer = channel.getWriter();
+    var i = start;
+    while (i <= end) : (i += 1) {
+        try writer.write(i);
+    }
+}
+
+fn consumerFunc(channel: *channels.Channel(i32)) void {
+    const reader = channel.getReader();
+    while (reader.read()) |data| {
+        std.debug.print("Consumed: {}\n", .{data});
+    }
 }
 ```
 
@@ -194,16 +296,28 @@ fn processMessages() !void {
 
 ### Thread Safety
 
-- **Mutex Protection**: All channel operations are protected by a mutex
+- **Mutex Protection**: All channel operations are protected by a single mutex
 - **Condition Variables**: Used for efficient blocking/waking of threads
+- **Atomic Operations**: Channel completion state is protected by mutex
 - **Memory Safety**: Proper allocation/deallocation prevents memory leaks
+
+### Synchronization Flow
+
+1. **Writer**: 
+   - Acquires mutex → checks if completed → allocates node → adds to queue → signals condition → releases mutex
+   - Uses `signal()` to wake up one waiting reader
+   - Uses `broadcast()` on completion to wake up all waiting readers
+
+2. **Reader**: 
+   - Acquires mutex → checks queue and completion state → if empty and not completed, waits on condition → when woken, re-checks → removes data → releases mutex
 
 ### Performance Characteristics
 
-- **Blocking Reads**: Readers block when no data is available
+- **Blocking Reads**: Readers block when no data is available using condition variables
 - **Non-blocking Writes**: Writers add data and immediately signal readers
 - **O(1) Operations**: Both read and write operations are constant time
 - **Memory Overhead**: Each message requires one doubly-linked list node
+- **No Busy-Waiting**: Uses condition variables instead of polling
 
 ### Memory Management
 
@@ -211,224 +325,97 @@ fn processMessages() !void {
 - Nodes are allocated per message and freed when consumed
 - Channel cleanup destroys all remaining nodes
 - No memory leaks when properly using `defer channel.deinit()`
+- Allocation only fails with `OutOfMemory` error
+
+### Error Handling
+
+The library uses Zig's error handling:
+- `try` for propagating errors
+- `catch` for handling specific errors
+- `orelse` for handling optional values (null from completed channels)
+
+## Project Structure
+
+```
+src/
+├── channels/
+│   ├── root.zig       # Main export file
+│   ├── channel.zig    # Channel implementation with tests
+│   └── common.zig     # Common types and errors
+├── main.zig           # Example usage
+└── root.zig           # Library root
+```
 
 ## Building and Testing
 
 ### Build
 
 ```bash
+# Build the library
 zig build
+
+# Build in release mode
+zig build -Doptimize=ReleaseFast
+
+# Build in debug mode
+zig build -Doptimize=Debug
 ```
 
 ### Run Example
 
 ```bash
+# Run the example in main.zig
 zig build run
-```
-
-### Debug Build
-
-```bash
-zig build -Doptimize=Debug
 ```
 
 ### Testing
 
 ```bash
+# Run all tests
 zig build test
+
+# Run tests for specific file
+zig test src/channels/channel.zig
 ```
 
-## VS Code Development
-
-This project includes VS Code configuration for debugging:
-
-- **Debug configurations** in `.vscode/launch.json`
-- **Build tasks** in `.vscode/tasks.json`
-- **Recommended extensions** for Zig development
-
-Press `F5` to start debugging the example application.
+The test suite includes:
+- Basic read/write operations
+- Channel completion behavior
+- Error handling scenarios
+- Multi-threaded producer/consumer patterns
+- Memory leak detection
+- Different data types
 
 ## Requirements
 
-- **Zig 0.14.0** or later
+- **Zig 0.13.0** or later
 - **Windows/Linux/macOS** - cross-platform compatible
-
-## License
-
-MIT License - see LICENSE file for details.
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests if applicable
-5. Submit a pull request
 
 ## Examples
 
-See `src/main.zig` for a complete working example of the channel system in action.
-
-fn consumer(channel: *zigChannels.Channel(i32)) void {
-    var reader = channel.getReader();
-    
-    for (0..10) |_| {
-        const value = reader.read();
-        std.debug.print("Consumed: {}\n", .{value});
-    }
-}
-
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    var channel = zigChannels.Channel(i32).init(allocator);
-    
-    var worker_data = WorkerData{
-        .channel = &channel,
-        .start = 1,
-        .end = 11,
-    };
-
-    // Start producer thread
-    const producer_thread = try Thread.spawn(.{}, producer, .{&worker_data});
-    
-    // Start consumer thread  
-    const consumer_thread = try Thread.spawn(.{}, consumer, .{&channel});
-
-    // Wait for threads to complete
-    producer_thread.join();
-    consumer_thread.join();
-}
-```
-
-## API Reference
-
-### Channel(T)
-
-Generic channel type for values of type `T`.
-
-#### Methods
-
-##### `init(allocator: Allocator) Self`
-
-Creates a new channel with the given allocator.
-
-**Parameters:**
-- `allocator`: Memory allocator for internal data structures
-
-**Returns:** New channel instance
-
-##### `getReader(self: *Self) Reader(T)`
-
-Creates a reader for this channel.
-
-**Returns:** Reader instance
-
-##### `getWriter(self: *Self) Writer(T)`
-
-Creates a writer for this channel.
-
-**Returns:** Writer instance
-
-### Writer(T)
-
-Writer handle for sending data to a channel.
-
-#### Methods
-
-##### `write(self: *Self, data: T) !void`
-
-Writes data to the channel. This operation is thread-safe and will wake up any waiting readers.
-
-**Parameters:**
-- `data`: Value to write to the channel
-
-**Errors:**
-- `OutOfMemory`: If allocation fails
-
-### Reader(T)
-
-Reader handle for receiving data from a channel.
-
-#### Methods
-
-##### `read(self: *Self) T`
-
-Reads data from the channel. Blocks until data is available.
-
-**Returns:** Value read from the channel
-
-## How It Works
-
-The channel implementation uses:
-
-1. **DoublyLinkedList**: For storing queued messages
-2. **Mutex**: For thread-safe access to the queue
-3. **Condition Variable**: For efficient blocking when no data is available
-
-### Synchronization Flow
-
-1. **Writer**: Acquires mutex → adds data to queue → signals condition → releases mutex
-2. **Reader**: Acquires mutex → checks if data available → if not, waits on condition → when woken, removes data → releases mutex
-
-This avoids busy-waiting and provides efficient thread coordination.
-
-## Building
-
-```bash
-# Build the library
-zig build
-
-# Run tests (if available)
-zig build test
-
-# Build in release mode
-zig build -Doptimize=ReleaseFast
-```
-
-## Requirements
-
-- Zig 0.14.0 or later
-
-## Thread Safety
-
-All operations are thread-safe:
-- Multiple readers can safely read from the same channel
-- Multiple writers can safely write to the same channel  
-- Readers and writers can operate concurrently
-
-## Memory Management
-
-- Channel nodes are allocated using the provided allocator
-- Memory is automatically freed when messages are consumed
-- No manual cleanup required for messages
-
-## Performance Considerations
-
-- Uses condition variables for efficient blocking (no busy-waiting)
-- Minimal lock contention with proper mutex usage
-- Memory allocation only occurs when writing to the channel
+See `src/main.zig` for a complete working example demonstrating:
+- Channel creation and cleanup
+- Producer and consumer threads
+- Proper completion handling
+- Error handling patterns
 
 ## Contributing
 
 1. Fork the repository
-2. Create a feature branch
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
 3. Make your changes
-4. Add tests if applicable
-5. Submit a pull request
+4. Add tests for new functionality
+5. Ensure all tests pass (`zig build test`)
+6. Commit your changes (`git commit -m 'Add amazing feature'`)
+7. Push to the branch (`git push origin feature/amazing-feature`)
+8. Open a Pull Request
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## Similar Projects
-
-- Go channels (inspiration)
-- Rust's `std::sync::mpsc`
-- C++ condition variables
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ## Acknowledgments
 
-Inspired by Go's channel implementation and built using modern Zig threading primitives.
+- Inspired by Go's channel implementation
+- Built using Zig's modern threading primitives
+- Thanks to the Zig community for excellent documentation and examples
