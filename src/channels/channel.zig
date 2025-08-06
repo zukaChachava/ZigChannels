@@ -2,6 +2,7 @@ const std = @import("std");
 const Thread = std.Thread;
 const Allocator = std.mem.Allocator;
 const DoublyLinkedList = std.DoublyLinkedList;
+const ChannelError = @import("./common.zig").ChannelError;
 
 pub fn Channel(comptime T: type) type{
     return struct {
@@ -114,7 +115,3 @@ fn Reader(comptime T: type) type{
     };
 }
 
-const ChannelError = error {
-    OutOfMemory,
-    ChannelClosed
-};

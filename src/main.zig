@@ -5,7 +5,7 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
     defer _ = gpa.deinit();
-
+    
     const channel = try channels.Channel(i32).init(allocator);
     defer channel.deinit();
 
