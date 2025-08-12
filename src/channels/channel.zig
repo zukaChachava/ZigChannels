@@ -44,7 +44,7 @@ pub fn Channel(comptime T: type) type {
     };
 }
 
-fn Writer(comptime T: type) type {
+pub fn Writer(comptime T: type) type {
     return struct {
         channel: *Channel(T),
         const Self = @This();
@@ -79,7 +79,7 @@ fn Writer(comptime T: type) type {
     };
 }
 
-fn Reader(comptime T: type) type {
+pub fn Reader(comptime T: type) type {
     return struct {
         channel: *Channel(T),
 
