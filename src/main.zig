@@ -9,7 +9,7 @@ pub fn main() !void {
 // -- Topic Example
 
 fn topicExample() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 

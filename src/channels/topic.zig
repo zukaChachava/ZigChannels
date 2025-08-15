@@ -6,6 +6,34 @@ const ArrayHashMap = std.AutoArrayHashMap;
 const DoublyLinkedList = std.DoublyLinkedList;
 const Allocator = std.mem.Allocator;
 
+/// Creates a thread-safe publish-subscribe communication topic for type T.
+///
+/// A Topic provides one-to-many message broadcasting between threads.
+/// Messages published by writers are delivered to ALL subscribers (readers)
+/// in FIFO order. Each subscriber receives their own copy of every message.
+///
+/// Unlike channels which provide point-to-point communication, topics implement
+/// the publish-subscribe pattern where one message reaches multiple recipients.
+///
+/// The topic uses a mutex and condition variable for thread-safe operations
+/// and efficient blocking when no data is available.
+///
+/// ## Example
+/// ```zig
+/// const topic = try Topic(i32).init(allocator);
+/// defer topic.deinit();
+///
+/// const reader1 = try topic.createReader();
+/// const reader2 = try topic.createReader();
+/// defer reader1.deinit();
+/// defer reader2.deinit();
+///
+/// const writer = topic.createWriter();
+/// try writer.write(42); // Both readers receive 42
+/// ```
+///
+/// @param T The type of data that will be broadcast through the topic
+/// @return A topic type that can be instantiated with init()
 pub fn Topic(comptime T: type) type {
     return struct {
         readers: ArrayHashMap(usize, *Reader(T)),
@@ -17,6 +45,27 @@ pub fn Topic(comptime T: type) type {
 
         const Self = @This();
 
+        /// Initializes a new topic instance.
+        ///
+        /// Creates and allocates memory for a new topic that can be used for
+        /// thread-safe publish-subscribe communication between publishers and subscribers.
+        ///
+        /// The topic starts in an uncompleted state and is ready to accept subscribers
+        /// and publish messages. You must call deinit() when done to prevent memory leaks.
+        ///
+        /// ## Example
+        /// ```zig
+        /// var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+        /// const allocator = gpa.allocator();
+        /// defer _ = gpa.deinit();
+        ///
+        /// const topic = try Topic(i32).init(allocator);
+        /// defer topic.deinit();
+        /// ```
+        ///
+        /// @param allocator The allocator to use for internal memory management
+        /// @return A pointer to the newly created topic
+        /// @error OutOfMemory if memory allocation fails
         pub fn init(allocator: Allocator) ChannelError!*Self {
             const topic = allocator.create(Self) catch |err| switch (err) {
                 error.OutOfMemory => return ChannelError.OutOfMemory,
@@ -35,6 +84,36 @@ pub fn Topic(comptime T: type) type {
             return topic;
         }
 
+        /// Creates a new subscriber reader for this topic.
+        ///
+        /// Creates a new reader that will receive ALL messages published to this topic.
+        /// Each reader has its own message queue and receives a copy of every message
+        /// published after subscription begins.
+        ///
+        /// Readers created before messages are published will receive all messages.
+        /// Each reader operates independently and can consume messages at its own pace.
+        ///
+        /// The reader must be cleaned up by calling its deinit() method when no longer needed.
+        ///
+        /// ## Behavior
+        /// - Each reader gets its own unique ID and message queue
+        /// - All readers receive every message published to the topic
+        /// - Readers can be created and destroyed dynamically
+        /// - Multiple readers can read concurrently without affecting each other
+        ///
+        /// ## Example
+        /// ```zig
+        /// const reader1 = try topic.createReader();
+        /// const reader2 = try topic.createReader();
+        /// defer reader1.deinit();
+        /// defer reader2.deinit();
+        ///
+        /// // Both readers will receive the same messages
+        /// ```
+        ///
+        /// @param self Pointer to the topic instance
+        /// @return A pointer to the newly created reader
+        /// @error OutOfMemory if memory allocation fails
         pub fn createReader(self: *Self) ChannelError!*Reader(T) {
             self.mutex.lock();
             defer self.mutex.unlock();
@@ -50,6 +129,23 @@ pub fn Topic(comptime T: type) type {
             return reader;
         }
 
+        /// Creates a writer interface for publishing data to all subscribers.
+        ///
+        /// Returns a Writer instance that can be used to broadcast messages to all
+        /// subscribers of this topic. The writer is lightweight and can be copied freely.
+        ///
+        /// Multiple writers can publish to the same topic safely. Each message
+        /// will be delivered to all current subscribers.
+        ///
+        /// ## Example
+        /// ```zig
+        /// const writer = topic.createWriter();
+        /// try writer.write(42); // Broadcast to all subscribers
+        /// try writer.complete(); // Signal end of publishing
+        /// ```
+        ///
+        /// @param self Pointer to the topic instance
+        /// @return A Writer instance for this topic
         pub fn createWriter(self: *Self) Writer(T) {
             return .{ .topic = self };
         }
@@ -61,6 +157,28 @@ pub fn Topic(comptime T: type) type {
             _ = self.readers.swapRemove(id);
         }
 
+        /// Cleans up topic resources and all associated readers.
+        ///
+        /// Destroys all subscriber readers and their message queues, then deallocates
+        /// the topic itself. This must be called when the topic is no longer needed
+        /// to prevent memory leaks.
+        ///
+        /// All associated readers will be automatically cleaned up, so you should not
+        /// call deinit() on individual readers after calling topic.deinit().
+        ///
+        /// After calling deinit(), the topic pointer becomes invalid and should
+        /// not be used.
+        ///
+        /// ## Example
+        /// ```zig
+        /// const topic = try Topic(i32).init(allocator);
+        /// defer topic.deinit(); // Recommended pattern
+        ///
+        /// const reader = try topic.createReader();
+        /// // reader.deinit() is NOT needed - topic.deinit() handles it
+        /// ```
+        ///
+        /// @param self Pointer to the topic instance
         pub fn deinit(self: *Self) void {
             var iterator = self.readers.iterator();
 
@@ -75,6 +193,25 @@ pub fn Topic(comptime T: type) type {
     };
 }
 
+/// Writer interface for publishing data to all subscribers of a topic.
+///
+/// A Writer provides a thread-safe interface for broadcasting messages to all
+/// subscribers of a topic. Writers are lightweight handles that contain only
+/// a pointer to the topic, making them cheap to copy and pass around.
+///
+/// Multiple writers can safely publish to the same topic concurrently.
+/// Each message published will be delivered to ALL current subscribers.
+///
+/// ## Thread Safety
+/// All Writer operations are thread-safe and can be called from multiple
+/// threads simultaneously.
+///
+/// ## Broadcasting Behavior
+/// When a message is written, it is copied to every subscriber's personal queue.
+/// This means the topic uses more memory than channels (O(n) where n is the number
+/// of subscribers), but provides true broadcast semantics.
+///
+/// @param T The type of data that can be published to the topic
 pub fn Writer(comptime T: type) type {
     return struct {
         topic: *Topic(T),
@@ -85,6 +222,35 @@ pub fn Writer(comptime T: type) type {
             return .{ .topic = topic };
         }
 
+        /// Publishes a message to all subscribers of the topic.
+        ///
+        /// Broadcasts data to all current subscribers of the topic. Each subscriber
+        /// will receive their own copy of the message in their personal queue.
+        /// If the topic has been completed (via complete()), this operation will
+        /// return an error.
+        ///
+        /// The operation is atomic and thread-safe. The message is copied to all
+        /// subscriber queues before any subscriber is notified, ensuring consistent
+        /// delivery.
+        ///
+        /// ## Behavior
+        /// - Message is copied to every current subscriber's queue
+        /// - All waiting subscribers are notified via broadcast signal
+        /// - If no subscribers exist, the message is effectively discarded
+        /// - Messages are delivered to each subscriber in FIFO order
+        /// - Performance is O(n) where n is the number of subscribers
+        ///
+        /// ## Example
+        /// ```zig
+        /// const writer = topic.createWriter();
+        /// try writer.write(42);        // All subscribers receive 42
+        /// try writer.write("hello");   // All subscribers receive "hello"
+        /// ```
+        ///
+        /// @param self The writer instance
+        /// @param item The data to broadcast to all subscribers
+        /// @error ChannelClosed if the topic has been completed
+        /// @error OutOfMemory if memory allocation for any subscriber's copy fails
         pub fn write(self: Self, item: T) ChannelError!void {
             self.topic.mutex.lock();
             defer self.topic.mutex.unlock();
@@ -109,6 +275,38 @@ pub fn Writer(comptime T: type) type {
             self.topic.condition.broadcast();
         }
 
+        /// Completes the topic, preventing further message publication.
+        ///
+        /// Marks the topic as completed and signals all current and future
+        /// subscribers that no more messages will be published. Any subscribers
+        /// currently waiting for messages will be notified immediately.
+        ///
+        /// After completion:
+        /// - All write() operations will return ChannelClosed error
+        /// - Existing messages in subscriber queues remain available
+        /// - New subscribers will immediately receive ChannelClosed on read()
+        /// - Existing subscribers will receive ChannelClosed after consuming their queues
+        ///
+        /// ## Thread Safety
+        /// This operation is atomic and thread-safe. Once completed, the topic
+        /// state is permanent and cannot be reversed.
+        ///
+        /// ## Error Handling
+        /// Returns ChannelClosed if the topic has already been completed.
+        /// This prevents double-completion which could lead to inconsistent state.
+        ///
+        /// ## Example
+        /// ```zig
+        /// const writer = topic.createWriter();
+        /// try writer.write(1);
+        /// try writer.write(2);
+        /// try writer.complete();      // Signal completion
+        /// // writer.write(3);         // Would return ChannelClosed error
+        /// // writer.complete();       // Would also return ChannelClosed error
+        /// ```
+        ///
+        /// @param self The writer instance
+        /// @error ChannelClosed if the topic has already been completed
         pub fn complete(self: Self) ChannelError!void {
             self.topic.mutex.lock();
             defer self.topic.mutex.unlock();
@@ -122,6 +320,32 @@ pub fn Writer(comptime T: type) type {
     };
 }
 
+/// Creates a subscriber reader type for a topic-based communication channel.
+///
+/// A Reader represents a subscriber in the publish-subscribe pattern. Each reader
+/// maintains its own independent message queue and receives copies of all messages
+/// published to the topic after the reader was created. Messages are delivered
+/// in FIFO order and each reader processes messages independently.
+///
+/// ## Key Characteristics
+/// - Each reader has a unique ID within the topic
+/// - Independent message queue per reader (no message sharing)
+/// - FIFO message delivery per subscriber
+/// - Thread-safe read operations with blocking support
+/// - Automatic cleanup when reader is destroyed
+/// - Receives all messages published after reader creation
+///
+/// ## Memory Management
+/// Readers are heap-allocated and must be properly deallocated using deinit().
+/// Each reader maintains its own copy of published messages, so memory usage
+/// scales with (number of readers × number of unread messages).
+///
+/// ## Thread Safety
+/// Multiple readers can safely operate concurrently. Each reader's queue
+/// is independent and protected by the topic's shared mutex.
+///
+/// @param T The type of data that will be published and received
+/// @return A type that can be instantiated to create topic subscribers
 pub fn Reader(comptime T: type) type {
     return struct {
         id: usize,
@@ -147,6 +371,46 @@ pub fn Reader(comptime T: type) type {
             return reader;
         }
 
+        /// Reads the next message from this subscriber's queue.
+        ///
+        /// Retrieves the oldest unread message from this reader's personal queue.
+        /// If no messages are available, the calling thread will block until either:
+        /// - A new message is published (and copied to this reader's queue)
+        /// - The topic is completed by a writer
+        ///
+        /// ## Blocking Behavior
+        /// This operation blocks the calling thread when the queue is empty and
+        /// the topic is still active. The thread will be awakened when:
+        /// - A writer publishes a new message (via write())
+        /// - A writer completes the topic (via complete())
+        ///
+        /// ## Message Ordering
+        /// Messages are delivered in FIFO order per subscriber. Each reader
+        /// receives messages independently - reading from one reader does not
+        /// affect other readers' queues.
+        ///
+        /// ## Completion Handling
+        /// When the topic is completed and this reader's queue is empty,
+        /// read() returns null to indicate no more messages will arrive.
+        /// Any remaining messages in the queue can still be read normally.
+        ///
+        /// ## Thread Safety
+        /// Safe to call from multiple threads, though typically each reader
+        /// is used by a single consumer thread for message processing.
+        ///
+        /// ## Example
+        /// ```zig
+        /// const reader = try topic.createReader();
+        /// defer reader.deinit();
+        ///
+        /// while (reader.read()) |message| {
+        ///     std.debug.print("Received: {}\n", .{message});
+        /// }
+        /// std.debug.print("Topic completed, no more messages\n");
+        /// ```
+        ///
+        /// @param self Pointer to the reader instance
+        /// @return The next message, or null if topic is completed and queue is empty
         pub fn read(self: *Self) ?T {
             self.topic.mutex.lock();
             defer self.topic.mutex.unlock();
@@ -172,6 +436,42 @@ pub fn Reader(comptime T: type) type {
             self.allocator.destroy(self);
         }
 
+        /// Destroys the reader and cleans up all associated resources.
+        ///
+        /// Properly deallocates the reader and removes it from the topic's
+        /// subscriber list. This includes:
+        /// - Draining and freeing all unread messages in the reader's queue
+        /// - Removing the reader from the topic's subscriber registry
+        /// - Deallocating the reader instance itself
+        ///
+        /// ## Thread Safety
+        /// This operation is thread-safe and can be called while other readers
+        /// or writers are active. The removal from the topic is atomic.
+        ///
+        /// ## Important Notes
+        /// - Must be called for every reader created via createReader()
+        /// - After calling deinit(), the reader pointer becomes invalid
+        /// - Unread messages in the queue are permanently lost
+        /// - This does NOT affect other readers or the topic itself
+        ///
+        /// ## Memory Management
+        /// Failure to call deinit() will result in memory leaks, as each reader
+        /// maintains its own message queue and allocates memory for received messages.
+        ///
+        /// ## Example
+        /// ```zig
+        /// const reader = try topic.createReader();
+        ///
+        /// // Use the reader...
+        /// while (reader.read()) |message| {
+        ///     // Process message
+        /// }
+        ///
+        /// reader.deinit(); // Clean up - required!
+        /// // reader is now invalid and cannot be used
+        /// ```
+        ///
+        /// @param self Pointer to the reader instance to destroy
         // Info: removes reader from topic and destroys object
         pub fn deinit(self: *Self) void {
             while (self.data.popFirst()) |node| {
