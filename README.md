@@ -155,7 +155,7 @@ const zigChannels = b.dependency("zigChannels", .{
     .optimize = optimize,
 });
 
-exe.root_module.addImport("channels", zigChannels.module("zigChannels"));
+exe.root_module.addImport("channels", zigChannels.module("channels"));
 ```
 
 #### Method 2: Using zig fetch
@@ -175,7 +175,7 @@ const zigChannels = b.dependency("zigChannels", .{
     .optimize = optimize,
 });
 
-exe.root_module.addImport("channels", zigChannels.module("zigChannels"));
+exe.root_module.addImport("channels", zigChannels.module("channels"));
 ```
 
 ## API Reference
