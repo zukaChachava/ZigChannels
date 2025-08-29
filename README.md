@@ -130,6 +130,8 @@ fn subscriber(reader: *channels.TopicReader(i32), name: []const u8) void {
 
 ### Using Zig Package Manager
 
+#### Method 1: Using build.zig.zon
+
 Add to your `build.zig.zon`:
 
 ```zig
@@ -146,6 +148,26 @@ Add to your `build.zig.zon`:
 ```
 
 Then in your `build.zig`:
+
+```zig
+const zigChannels = b.dependency("zigChannels", .{
+    .target = target,
+    .optimize = optimize,
+});
+
+exe.root_module.addImport("channels", zigChannels.module("zigChannels"));
+```
+
+#### Method 2: Using zig fetch
+
+You can also use `zig fetch` to add ZigChannels to your project:
+
+```bash
+# From your project directory
+zig fetch --save https://github.com/zukaChachava/ZigChannels/archive/main.tar.gz
+```
+
+This will automatically update your `build.zig.zon` with the dependency. Then in your `build.zig`, add:
 
 ```zig
 const zigChannels = b.dependency("zigChannels", .{
