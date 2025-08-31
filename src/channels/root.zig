@@ -8,3 +8,5 @@ const TopicFile = @import("topic.zig");
 pub const Topic = TopicFile.Topic;
 pub const TopicWriter = TopicFile.Writer;
 pub const TopicReader = TopicFile.Reader;
+
+pub const ChannelError = @import("common.zig").ChannelError;
