@@ -1,4 +1,7 @@
-# ZigChannels
+# Deprecated !!!
+
+
+## ZigChannels
 
 A comprehensive thread-safe communication library for Zig, providing both **point-to-point channels** and **publish-subscribe topics** for inter-thread communication using condition variables and mutexes.
 
